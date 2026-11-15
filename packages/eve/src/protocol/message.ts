@@ -531,6 +531,8 @@ export interface StepStartedStreamEvent {
 export interface StepCompletedStreamEvent {
   data: {
     finishReason: AssistantStepFinishReason;
+    /** agentify#4207: provider model id of the step result, when the response carried one. */
+    modelId?: string;
     providerMetadata?: StepCompletedProviderMetadata;
     sequence: number;
     stepIndex: number;
@@ -1500,6 +1502,7 @@ export function createStepStartedEvent(input: {
  */
 export function createStepCompletedEvent(input: {
   readonly finishReason: AssistantStepFinishReason;
+  readonly modelId?: string;
   readonly providerMetadata?: StepCompletedProviderMetadata;
   readonly sequence: number;
   readonly stepIndex: number;
@@ -1524,6 +1527,9 @@ export function createStepCompletedEvent(input: {
   }
   if (input.providerMetadata !== undefined) {
     data.providerMetadata = input.providerMetadata;
+  }
+  if (typeof input.modelId === "string" && input.modelId.length > 0) {
+    data.modelId = input.modelId;
   }
 
   return {

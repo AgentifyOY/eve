@@ -97,6 +97,9 @@ catalogs:
       specifier: 4.5.4
       version: 4.5.4
 
+patchedDependencies:
+  '@workflow/world-local@5.0.0-beta.44': 4c7d1e4f7f097fc1353c0229ef18316c233520c7cf00f84fbd8cba3d96fdb43d
+
 importers:
 
   .:
@@ -1454,7 +1457,7 @@ importers:
         version: 5.0.0-beta.35
       '@workflow/world-local':
         specifier: 5.0.0-beta.44
-        version: 5.0.0-beta.44(@opentelemetry/api@1.9.1)
+        version: 5.0.0-beta.44(patch_hash=4c7d1e4f7f097fc1353c0229ef18316c233520c7cf00f84fbd8cba3d96fdb43d)(@opentelemetry/api@1.9.1)
       '@workflow/world-vercel':
         specifier: 5.0.0-beta.46
         version: 5.0.0-beta.46(@aws-sdk/credential-provider-web-identity@3.972.49)(@opentelemetry/api@1.9.1)(bufferutil@4.1.0)
@@ -4070,18 +4073,21 @@ packages:
   '@opentelemetry/sdk-trace-base@2.10.0':
     resolution: {integrity: sha512-GuYQQT7QD2EeO8lcZLRQzcbOyhqAzL+6WWTKTU9mSUBYBazkEDl+VrQcXQhbB08OWM9anD1aHleVadzulpOaUQ==}
     engines: {node: ^18.19.0 || >=20.6.0}
+    deprecated: Use @opentelemetry/sdk-trace package
     peerDependencies:
       '@opentelemetry/api': '>=1.3.0 <1.10.0'
 
   '@opentelemetry/sdk-trace-base@2.6.1':
     resolution: {integrity: sha512-r86ut4T1e8vNwB35CqCcKd45yzqH6/6Wzvpk2/cZB8PsPLlZFTvrh8yfOS3CYZYcUmAx4hHTZJ8AO8Dj8nrdhw==}
     engines: {node: ^18.19.0 || >=20.6.0}
+    deprecated: Use @opentelemetry/sdk-trace package
     peerDependencies:
       '@opentelemetry/api': '>=1.3.0 <1.10.0'
 
   '@opentelemetry/sdk-trace-base@2.7.1':
     resolution: {integrity: sha512-NAYIlsF8MPUsKqJMiDQJTMPOmlbawC1Iz/omMLygZ1C9am8fTKYjTaI+OZM+WTY3t3Glo0wnOg/6/pac6RGPPw==}
     engines: {node: ^18.19.0 || >=20.6.0}
+    deprecated: Use @opentelemetry/sdk-trace package
     peerDependencies:
       '@opentelemetry/api': '>=1.3.0 <1.10.0'
 
@@ -6951,6 +6957,9 @@ packages:
   '@smithy/core@3.29.7':
     resolution: {integrity: sha512-BiEE2bnnGoPKdlGe3L+gOYORDHFGPuYVRLP7iUow/Sflm0B4hC4XY3FC1MRuc7ltzpW2xNnXopKi34TTkULlKQ==}
     engines: {node: '>=18.0.0'}
+    deprecated: |-
+      Deprecated due to a bug in custom logger data redaction. Upgrade to the latest version. If you used a custom logger with this
+        version, review your logs and rotate any credentials or other secrets. See https://github.com/aws/aws-sdk-js-v3/issues/8393.
 
   '@smithy/eventstream-codec@4.4.12':
     resolution: {integrity: sha512-J1hJGf2yN6dbO960oGEDhAe6saEn2yzR2IC9vFKEYIYsiq8y8jdwQWGhY4UrvAdxozcnJ92KFHE0HdB75a9qHg==}
@@ -11409,6 +11418,7 @@ packages:
   image-size@2.0.2:
     resolution: {integrity: sha512-IRqXKlaXwgSMAMtpNzZa1ZAe8m+Sa1770Dhk8VkSsP9LS+iHD62Zd8FQKs8fbPiagBE7BzoFX23cxFnwshpV6w==}
     engines: {node: '>=16.x'}
+    deprecated: Use latest 2.x please
 
   immediate@3.0.6:
     resolution: {integrity: sha512-XXOFtyqDjNDAQxVfYxuF7g9Il/IbWmmlQg2MYKOH8ExIT1qg6xc4zyS3HaEEATgs1btfzxq15ciUiY7gjSXRGQ==}
@@ -13426,7 +13436,7 @@ packages:
   phase@0.0.1:
     resolution: {integrity: sha512-QTeTClFj700SPwdgfVckQ8uO/dquPO5MdxHpSLCOtKpJbLrpUrFnEVhoCuQKXMSWXNIMlnwPsKQ7fqfXCX6BJg==}
     engines: {node: 24.x}
-    deprecated: phase is now the scan tool; the runtime library moved to @usephase/core and @usephase/react
+    deprecated: 'phase is now the scan tool; the runtime library moved to @usephase/core and @usephase/react. Run: npx @usephase/codemod@latest migrate-phase-to-usephase .'
     peerDependencies:
       react: '>=18'
     peerDependenciesMeta:
@@ -23430,7 +23440,7 @@ snapshots:
       '@workflow/serde': 5.0.0-beta.2
       '@workflow/utils': 5.0.0-beta.10
       '@workflow/world': 5.0.0-beta.35
-      '@workflow/world-local': 5.0.0-beta.44(@opentelemetry/api@1.9.1)
+      '@workflow/world-local': 5.0.0-beta.44(patch_hash=4c7d1e4f7f097fc1353c0229ef18316c233520c7cf00f84fbd8cba3d96fdb43d)(@opentelemetry/api@1.9.1)
       '@workflow/world-vercel': 5.0.0-beta.46(@aws-sdk/credential-provider-web-identity@3.972.49)(@opentelemetry/api@1.9.1)(bufferutil@4.1.0)
       debug: 4.4.3(supports-color@10.2.2)
       devalue: 5.9.2
@@ -23468,7 +23478,7 @@ snapshots:
     dependencies:
       ms: 2.1.3
 
-  '@workflow/world-local@5.0.0-beta.44(@opentelemetry/api@1.9.1)':
+  '@workflow/world-local@5.0.0-beta.44(patch_hash=4c7d1e4f7f097fc1353c0229ef18316c233520c7cf00f84fbd8cba3d96fdb43d)(@opentelemetry/api@1.9.1)':
     dependencies:
       '@vercel/queue': 0.5.1(@opentelemetry/api@1.9.1)
       '@workflow/errors': 5.0.0-beta.21
@@ -23488,7 +23498,7 @@ snapshots:
       '@workflow/errors': 5.0.0-beta.21
       '@workflow/utils': 5.0.0-beta.10
       '@workflow/world': 5.0.0-beta.35
-      '@workflow/world-local': 5.0.0-beta.44(@opentelemetry/api@1.9.1)
+      '@workflow/world-local': 5.0.0-beta.44(patch_hash=4c7d1e4f7f097fc1353c0229ef18316c233520c7cf00f84fbd8cba3d96fdb43d)(@opentelemetry/api@1.9.1)
       cbor-x: 1.6.0
       dotenv: 17.3.1
       drizzle-orm: 0.45.2(@opentelemetry/api@1.9.1)(@types/pg@8.20.0)(@upstash/redis@1.38.4)(pg@8.20.0)(sql.js@1.14.1)

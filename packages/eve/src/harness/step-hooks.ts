@@ -338,6 +338,8 @@ export async function emitStepActions(
   // step.completed
   await emitFn(
     createStepCompletedEvent({
+      // agentify#4207: the model that answered the step (a fallback model can answer a step the resolver named).
+      modelId: step.response?.modelId,
       finishReason: normalizeAssistantStepFinishReason(step.finishReason),
       providerMetadata: extractStepProviderMetadata(step.providerMetadata),
       sequence: state.sequence,

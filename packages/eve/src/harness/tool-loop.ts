@@ -1481,7 +1481,16 @@ export function createToolLoopHarness(config: ToolLoopHarnessConfig): StepFn {
         toolApproval: buildToolApproval(modelTools),
         tools: effectiveTools,
       };
-      const agent = new ToolLoopAgent(agentSettings);
+      // agentify#7269: a host hook (globalThis[Symbol.for("agentify.eve-step-tools")]) may wrap the step's agent with
+      // the step's AI SDK tool set and eve's own tool definitions in reach. Without the hook the agent is unchanged.
+      const stepToolsHook = (globalThis as Record<symbol, unknown>)[
+        Symbol.for("agentify.eve-step-tools")
+      ] as (<A>(agent: A, tools: unknown, definitions: unknown) => A) | undefined;
+      const baseAgent = new ToolLoopAgent(agentSettings);
+      const agent =
+        stepToolsHook === undefined
+          ? baseAgent
+          : stepToolsHook(baseAgent, agentSettings.tools, config.tools);
 
       const executeModelCall = async (): Promise<HarnessStepResult> => {
         if (emit) {

@@ -1,0 +1,50 @@
+diff --git a/dist/index.js b/dist/index.js
+index e47412044998a3193782a4c96fd5397b26144881..48f2fdef5f36a4445f9934f7eb68e78a345e23e1 100644
+--- a/dist/index.js
++++ b/dist/index.js
+@@ -1,9 +1,11 @@
+ import { promises as fs } from 'node:fs';
+ import { rm } from 'node:fs/promises';
+ import path from 'node:path';
++import { setTimeout as sleep } from 'node:timers/promises';
++import { createWorkflowUrl } from '@workflow/utils';
+ import { mintedSpecVersion, reenqueueActiveRuns } from '@workflow/world';
+ import { warnIfRunningInVercelDeployment } from './build-target-mismatch.js';
+-import { config, resolveRecoverActiveRuns } from './config.js';
++import { config, resolveBaseUrl, resolveRecoverActiveRuns } from './config.js';
+ import { clearCreatedFilesCache, deleteJSON, hasTag, isUntagged, listTaggedFiles, listTaggedFilesByExtension, readJSON, } from './fs.js';
+ import { initDataDir } from './init.js';
+ import { instrumentObject } from './instrumentObject.js';
+@@ -78,7 +80,31 @@ export function createWorld(args) {
+                     fileIdFilter,
+                 })),
+             };
+-            await reenqueueActiveRuns(recoveryRuns, queue.queue, 'world-local');
++            // agentify#4416: re-enqueue the active runs only after the flow route's health check answers 200 (at
++            // most 120 s), and do not hold start() on it. Recovered deliveries sent before the handler answered got
++            // HTTP 502 and waited out the queue's 5 s retry, one pair of lines per open session on every start.
++            void (async () => {
++                let healthUrl;
++                let ready = false;
++                try {
++                    healthUrl = createWorkflowUrl(await resolveBaseUrl(mergedConfig), { type: 'health' });
++                }
++                catch { }
++                for (const begun = Date.now(); healthUrl && Date.now() - begun < 120_000;) {
++                    try {
++                        if ((await fetch(healthUrl, { method: 'HEAD' })).status === 200) {
++                            ready = true;
++                            break;
++                        }
++                    }
++                    catch { }
++                    await sleep(500);
++                }
++                if (!ready) {
++                    console.warn('[world-local] flow handler not ready after 120 s, re-enqueueing active runs anyway');
++                }
++                await reenqueueActiveRuns(recoveryRuns, queue.queue, 'world-local');
++            })().catch((err) => console.error('[world-local] active run recovery failed:', err));
+         },
+         async close() {
+             clearStorageCache();
