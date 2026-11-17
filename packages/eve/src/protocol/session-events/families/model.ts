@@ -42,8 +42,8 @@ export interface ModelSettledData {
   readonly finishReason?: string;
   readonly generationId?: string;
   /**
-   * The model the provider says answered, when its response named one. It can differ from
-   * `model.started`'s `modelId` when a gateway falls back to another model.
+   * The model the provider's response names, present only when it differs from the model eve
+   * requested. A provider can report a dated snapshot for an alias, or a router another model.
    */
   readonly modelId?: string;
   readonly error?: ErrorInfo;

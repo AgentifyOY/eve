@@ -38,6 +38,7 @@ export function withCallResults(input: {
     ...(input.invalidInputToolCallIds === undefined
       ? {}
       : { invalidInputToolCallIds: input.invalidInputToolCallIds }),
+    model: stepResult.model,
     providerMetadata: stepResult.providerMetadata,
     response: {
       ...stepResult.response,

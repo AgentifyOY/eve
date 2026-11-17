@@ -44,6 +44,7 @@ export type HarnessStepResult = Pick<
   StepResult<ToolSet>,
   | "content"
   | "finishReason"
+  | "model"
   | "providerMetadata"
   | "response"
   | "text"
@@ -222,13 +223,16 @@ export async function emitStepActions(
   }
   if (runId === undefined) return;
   const result = finalOutputOf(step);
-  const modelId = step.response?.modelId;
+  // The AI SDK fills `response.modelId` with the requested model when the provider names none,
+  // so only a different id says something.
+  const answeredBy = step.response?.modelId;
   await emitFn(
     settleRun(
       {
         finishReason: normalizeAssistantStepFinishReason(step.finishReason),
         generationId: readGatewayGenerationId(step.providerMetadata),
-        ...(typeof modelId === "string" && modelId.length > 0 && { modelId }),
+        ...(answeredBy !== undefined &&
+          answeredBy !== step.model?.modelId && { modelId: answeredBy }),
         outcome: "completed",
         runId,
         usage: runUsageOf({
