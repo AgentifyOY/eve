@@ -11,5 +11,6 @@
   "Occurrence",
   "SessionFrame",
   "auto",
-  "defineDynamic"
+  "defineDynamic",
+  "experimental_getStepTools"
 ]

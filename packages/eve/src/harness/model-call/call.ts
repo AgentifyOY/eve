@@ -51,6 +51,7 @@ import {
   runUsageOf,
 } from "#harness/step-hooks.js";
 import { estimateTokens } from "#harness/token-estimate.js";
+import { withStepTools } from "#harness/model-call/step-tools.js";
 import { throwIfTurnAborted } from "#harness/turn-cancellation.js";
 import { throwIfSessionStreamDead } from "#harness/session-stream-write-error.js";
 import type { StepResult } from "#harness/types.js";
@@ -441,7 +442,9 @@ export class ModelCaller {
     const agent = new ToolLoopAgent(settings);
 
     try {
-      return await this.stream(agent, callMessages, hooks.stepResult, attempt?.telemetry);
+      return await withStepTools(tools, () =>
+        this.stream(agent, callMessages, hooks.stepResult, attempt?.telemetry),
+      );
     } catch (error) {
       // An aborted write is not a stalled model stream, and steering can't claim a dead stream.
       throwIfSessionStreamDead(error);
