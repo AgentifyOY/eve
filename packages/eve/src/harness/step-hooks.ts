@@ -222,11 +222,13 @@ export async function emitStepActions(
   }
   if (runId === undefined) return;
   const result = finalOutputOf(step);
+  const modelId = step.response?.modelId;
   await emitFn(
     settleRun(
       {
         finishReason: normalizeAssistantStepFinishReason(step.finishReason),
         generationId: readGatewayGenerationId(step.providerMetadata),
+        ...(typeof modelId === "string" && modelId.length > 0 && { modelId }),
         outcome: "completed",
         runId,
         usage: runUsageOf({

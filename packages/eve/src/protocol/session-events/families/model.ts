@@ -41,6 +41,11 @@ export interface ModelSettledData {
   /** The provider's finish reason, as an open string: `stop`, `tool-calls`, `length`, …. */
   readonly finishReason?: string;
   readonly generationId?: string;
+  /**
+   * The model the provider says answered, when its response named one. It can differ from
+   * `model.started`'s `modelId` when a gateway falls back to another model.
+   */
+  readonly modelId?: string;
   readonly error?: ErrorInfo;
 }
 
@@ -72,6 +77,7 @@ export const modelSchemas = {
         error: errorInfo.optional(),
         finishReason: z.string().optional(),
         generationId: z.string().optional(),
+        modelId: z.string().optional(),
         outcome: known<ModelOutcome>(),
         runId: id,
       }),

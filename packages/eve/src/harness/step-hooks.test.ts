@@ -4,8 +4,10 @@ import { describe, expect, it, vi } from "vitest";
 import { ContextContainer, contextStorage } from "#context/container.js";
 import { ConversationIdKey } from "#context/keys.js";
 import { resolveModelProfile } from "#harness/model-profile.js";
-import { buildStepHooks } from "#harness/step-hooks.js";
+import type { TurnPosition } from "#harness/session-machine/view.js";
+import { buildStepHooks, emitStepActions, type HarnessStepResult } from "#harness/step-hooks.js";
 import type { HarnessSession } from "#harness/types.js";
+import type { SessionEvent } from "#protocol/session-event.js";
 
 function createSession(): HarnessSession {
   return {
@@ -268,5 +270,34 @@ describe("buildStepHooks", () => {
     });
     expect(prepared?.providerOptions).toEqual({ openai: { promptCacheKey: expect.any(String) } });
     expect(prepared?.messages?.[0]?.providerOptions).toBeUndefined();
+  });
+});
+
+describe("emitStepActions", () => {
+  async function settledData(response: { readonly modelId?: string }) {
+    const events: SessionEvent[] = [];
+    await emitStepActions(
+      async (commit) => {
+        events.push(...(commit as readonly SessionEvent[]));
+      },
+      { runId: "run-1" } as TurnPosition,
+      {
+        content: [],
+        finishReason: "stop",
+        response,
+        toolCalls: [],
+      } as unknown as HarnessStepResult,
+      [],
+    );
+    return events.find((event) => event.type === "model.settled")?.data;
+  }
+
+  it("records the model the response names on model.settled", async () => {
+    expect(await settledData({ modelId: "provider/fallback-model" })).toMatchObject({
+      modelId: "provider/fallback-model",
+      outcome: "completed",
+      runId: "run-1",
+    });
+    expect(await settledData({})).not.toHaveProperty("modelId");
   });
 });
