@@ -332,3 +332,24 @@ describe("a failed model call", () => {
     );
   });
 });
+
+describe("model.settled modelId", () => {
+  const settledOf = async (parts: readonly StreamPart[]) =>
+    (await runTurn(async () => streamOf(parts))).find((event) => event.type === "model.settled")
+      ?.data;
+
+  it("records the model the response names when it differs from the requested one", async () => {
+    const [start, ...rest] = reply("Here it is.");
+    expect(
+      await settledOf([start!, { modelId: "fallback-model", type: "response-metadata" }, ...rest]),
+    ).toMatchObject({ modelId: "fallback-model", outcome: "completed" });
+  });
+
+  it("omits it when the response names the requested model or none", async () => {
+    expect(await settledOf(reply("Here it is."))).not.toHaveProperty("modelId");
+    const [start, ...rest] = reply("Here it is.");
+    expect(
+      await settledOf([start!, { modelId: "mock-model-id", type: "response-metadata" }, ...rest]),
+    ).not.toHaveProperty("modelId");
+  });
+});

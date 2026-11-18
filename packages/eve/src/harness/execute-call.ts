@@ -39,6 +39,7 @@ export function toEntryStep<T extends ModelMessage>(
     content: (step.content ?? []).map((part) => toEntryPart(part, resolve)),
     finishReason: step.finishReason,
     invalidInputToolCallIds: step.invalidInputToolCallIds,
+    model: step.model,
     providerMetadata: step.providerMetadata,
     response: step.response,
     signIns: step.signIns,

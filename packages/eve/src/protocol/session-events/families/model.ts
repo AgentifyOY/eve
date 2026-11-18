@@ -44,6 +44,11 @@ export interface ModelSettledData {
   /** The provider's finish reason, as an open string: `stop`, `tool-calls`, `length`, …. */
   readonly finishReason?: string;
   readonly generationId?: string;
+  /**
+   * The model the provider's response names, present only when it differs from the model eve
+   * requested. A provider can report a dated snapshot for an alias, or a router another model.
+   */
+  readonly modelId?: string;
   readonly error?: ErrorInfo;
 }
 
@@ -80,6 +85,7 @@ export const modelSchemas = {
         error: errorInfo.optional(),
         finishReason: z.string().optional(),
         generationId: z.string().optional(),
+        modelId: z.string().optional(),
         outcome: known<ModelOutcome>(),
         runId: id,
       }),
