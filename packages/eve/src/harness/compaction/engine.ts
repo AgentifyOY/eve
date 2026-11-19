@@ -251,19 +251,6 @@ interface CompactionHeuristicInput {
   readonly summarize: CompactionSummarizer;
 }
 
-type ToolModelMessage = Extract<ModelMessage, { readonly role: "tool" }>;
-
-/**
- * Rewrites one tool-result message from before the current turn before compaction summarizes or
- * keeps it: return a shorter message, the same one, or `null` to drop the observation. Tool calls
- * whose results are dropped are dropped with them, so the history keeps every call paired.
- */
-export type ObservationMask = (message: ToolModelMessage) => ToolModelMessage | null;
-
-export interface CompactionOptions {
-  readonly maskObservation?: ObservationMask;
-}
-
 /**
  * A heuristic either produces a complete replacement history and the stage it ended at, or
  * signals that the next heuristic must run. Anything exceptional throws.
@@ -301,18 +288,11 @@ export async function compactMessages(
    * answer, and the next turn's input follows the summary: nothing is replayed or prompted.
    */
   resume = true,
-  options: CompactionOptions = {},
 ): Promise<{ readonly messages: ModelMessage[]; readonly stage: CompactionStage }> {
   const extracted = extractPreviousCheckpoint(messages);
   const { previousCheckpoint } = extracted;
-  let currentTurnStart = resume ? findLastRealUserIndex(extracted.conversation) : -1;
-  let conversation = extracted.conversation;
-  if (options.maskObservation !== undefined) {
-    const olderEnd = currentTurnStart < 0 ? conversation.length : currentTurnStart;
-    const older = maskObservations(conversation.slice(0, olderEnd), options.maskObservation);
-    conversation = [...older, ...conversation.slice(olderEnd)];
-    if (currentTurnStart >= 0) currentTurnStart = older.length;
-  }
+  const conversation = extracted.conversation;
+  const currentTurnStart = resume ? findLastRealUserIndex(conversation) : -1;
   for (const heuristic of COMPACTION_HEURISTICS) {
     const outcome = await heuristic({
       config,
@@ -335,8 +315,9 @@ export async function compactMessages(
  * Keeps the current turn, its request and every tool call and result after it, byte for byte,
  * and compacts only the turns before it: their summary, then as much of their recent tail as
  * reaches the target. A model that loses its own turn answers an earlier one. Hands over to
- * {@link fixedTailHeuristic} only when no request is in progress or the turn alone is over the
- * model's window, where no history around it could be sent.
+ * {@link fixedTailHeuristic} when no request is in progress or the turn alone, after an empty
+ * summary, is over the threshold: the turn then compacts inside itself at the same point it did
+ * before the turn was kept, so `compaction.threshold` still bounds a long single-turn task.
  */
 async function currentTurnHeuristic({
   config,
@@ -351,10 +332,8 @@ async function currentTurnHeuristic({
   const turn = conversation.slice(currentTurnStart);
   const older = conversation.slice(0, currentTurnStart);
   const ratio = estimateRatio(config);
-  const window =
-    config.contextWindowTokens === undefined
-      ? config.threshold
-      : config.contextWindowTokens - (config.requestEnvelopeTokens ?? 0);
+  const underThreshold = (candidate: readonly ModelMessage[]) =>
+    estimateTokens(candidate) <= config.threshold;
   // Providers without assistant prefill reject a history that ends on assistant content.
   const resumable =
     turn.at(-1)?.role === "assistant"
@@ -364,7 +343,7 @@ async function currentTurnHeuristic({
         ]
       : turn;
   const build = (text: string) => [...checkpointHead(text), ...resumable];
-  if (Math.ceil(estimateTokens(build("")) * ratio) > window) return { type: "insufficient" };
+  if (!underThreshold(build(""))) return { type: "insufficient" };
   // Nothing before the turn is left to fold in: the history stays as it is, with no summary call.
   if (older.length === 0) {
     const kept = resumable === turn ? [...messages] : [...messages, resumable.at(-1)!];
@@ -406,15 +385,7 @@ async function currentTurnHeuristic({
       return { messages: stripped, stage: "text-tail", type: "compacted" };
     }
   }
-  // A turn over the threshold but inside the window keeps the summary clipped to the window.
-  const clipped =
-    clipSummary(summary, build, (candidate) => estimateTokens(candidate) <= config.threshold) ??
-    clipSummary(
-      summary,
-      build,
-      (candidate) => Math.ceil(estimateTokens(candidate) * ratio) <= window,
-    ) ??
-    build("");
+  const clipped = clipSummary(summary, build, underThreshold) ?? build("");
   return { messages: clipped, stage: "summary-only", type: "compacted" };
 }
 
@@ -443,35 +414,6 @@ function clipSummary(
     }
   }
   return clip(low);
-}
-
-/**
- * Applies `mask` to each tool-result message and drops the tool calls whose results it dropped,
- * with any assistant message that has nothing else left.
- */
-function maskObservations(
-  messages: readonly ModelMessage[],
-  mask: ObservationMask,
-): ModelMessage[] {
-  const dropped = new Set<string>();
-  const resultIds = (message: ToolModelMessage) =>
-    message.content.flatMap((part) => (part.type === "tool-result" ? [part.toolCallId] : []));
-  const masked = messages.flatMap((message): ModelMessage[] => {
-    if (message.role !== "tool") return [message];
-    const next = mask(message);
-    const kept = new Set(next === null ? [] : resultIds(next));
-    for (const id of resultIds(message)) if (!kept.has(id)) dropped.add(id);
-    return next === null ? [] : [next];
-  });
-  if (dropped.size === 0) return masked;
-  return masked.flatMap((message): ModelMessage[] => {
-    if (message.role !== "assistant" || typeof message.content === "string") return [message];
-    const content = message.content.filter(
-      (part) => part.type !== "tool-call" || !dropped.has(part.toolCallId),
-    );
-    if (content.length === message.content.length) return [message];
-    return content.length === 0 ? [] : [{ ...message, content }];
-  });
 }
 
 /**
