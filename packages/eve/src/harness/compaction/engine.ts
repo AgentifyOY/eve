@@ -241,7 +241,11 @@ function startStage(lastStage: CompactionStage | undefined): CompactionStage {
 interface CompactionHeuristicInput {
   readonly config: CompactionConfig;
   readonly conversation: readonly ModelMessage[];
+  /** Where the current turn starts in `conversation`, or -1 when no request is in progress. */
+  readonly currentTurnStart: number;
   readonly forceSummary: boolean;
+  /** The history as handed to the compaction, previous checkpoint included. */
+  readonly messages: readonly ModelMessage[];
   readonly previousCheckpoint: string | undefined;
   readonly resume: boolean;
   readonly summarize: CompactionSummarizer;
@@ -265,7 +269,10 @@ type CompactionHeuristic = (input: CompactionHeuristicInput) => Promise<Compacti
  * Heuristics tried in order. Composing a new strategy (pruning variants, protect-lists) means
  * adding an entry here.
  */
-const COMPACTION_HEURISTICS: readonly CompactionHeuristic[] = [fixedTailHeuristic];
+const COMPACTION_HEURISTICS: readonly CompactionHeuristic[] = [
+  currentTurnHeuristic,
+  fixedTailHeuristic,
+];
 
 /**
  * Compacts messages with the first {@link CompactionHeuristic} that produces a history. Returns
@@ -282,12 +289,17 @@ export async function compactMessages(
    */
   resume = true,
 ): Promise<{ readonly messages: ModelMessage[]; readonly stage: CompactionStage }> {
-  const { conversation, previousCheckpoint } = extractPreviousCheckpoint(messages);
+  const extracted = extractPreviousCheckpoint(messages);
+  const { previousCheckpoint } = extracted;
+  const conversation = extracted.conversation;
+  const currentTurnStart = resume ? findLastRealUserIndex(conversation) : -1;
   for (const heuristic of COMPACTION_HEURISTICS) {
     const outcome = await heuristic({
       config,
       conversation,
+      currentTurnStart,
       forceSummary,
+      messages,
       previousCheckpoint,
       resume,
       summarize,
@@ -297,6 +309,111 @@ export async function compactMessages(
     }
   }
   throw overLimitError(config);
+}
+
+/**
+ * Keeps the current turn, its request and every tool call and result after it, byte for byte,
+ * and compacts only the turns before it: their summary, then as much of their recent tail as
+ * reaches the target. A model that loses its own turn answers an earlier one. Hands over to
+ * {@link fixedTailHeuristic} when no request is in progress or the turn alone, after an empty
+ * summary, is over the threshold: the turn then compacts inside itself at the same point it did
+ * before the turn was kept, so `compaction.threshold` still bounds a long single-turn task.
+ */
+async function currentTurnHeuristic({
+  config,
+  conversation,
+  currentTurnStart,
+  forceSummary,
+  messages,
+  previousCheckpoint,
+  summarize,
+}: CompactionHeuristicInput): Promise<CompactionHeuristicOutcome> {
+  if (currentTurnStart < 0) return { type: "insufficient" };
+  const turn = conversation.slice(currentTurnStart);
+  const older = conversation.slice(0, currentTurnStart);
+  const ratio = estimateRatio(config);
+  const underThreshold = (candidate: readonly ModelMessage[]) =>
+    estimateTokens(candidate) <= config.threshold;
+  // Providers without assistant prefill reject a history that ends on assistant content.
+  const resumable =
+    turn.at(-1)?.role === "assistant"
+      ? [
+          ...turn,
+          createFrameworkUserMessage("execution.continuation", COMPACTION_RESUMPTION_MESSAGE),
+        ]
+      : turn;
+  const build = (text: string) => [...checkpointHead(text), ...resumable];
+  if (!underThreshold(build(""))) return { type: "insufficient" };
+  // Nothing before the turn is left to fold in: the history stays as it is, with no summary call.
+  if (older.length === 0) {
+    const kept = resumable === turn ? [...messages] : [...messages, resumable.at(-1)!];
+    return { messages: kept, stage: "summary-only", type: "compacted" };
+  }
+
+  const cappedOlder = capToolResults(older);
+  const recentConfig = forceSummary ? { ...config, recentWindowSize: 1 } : config;
+  const keep = selectRecentWindowSize(
+    cappedOlder,
+    recentConfig,
+    Math.max(0, keptTailBudget(config) - estimateTokens(turn)),
+  );
+  const { recent } = splitMessagesForCompaction(cappedOlder, keep);
+  const summaryPrompt = createCompactionPrompt({
+    messages: cappedOlder,
+    previousCheckpoint,
+    transcriptBudgetTokens: config.threshold,
+  });
+  const summary = await summarize({
+    messages: [createFrameworkUserMessage("context.compaction", summaryPrompt.prompt)],
+    system: summaryPrompt.system,
+  });
+
+  const reachesTarget = (candidate: readonly ModelMessage[]) =>
+    Math.ceil(estimateTokens(candidate) * ratio) <= config.target;
+  const start = startStage(config.lastStage);
+  if (start === "tail") {
+    const verbatim = [...checkpointHead(summary), ...recent, ...resumable];
+    if (reachesTarget(verbatim)) return { messages: verbatim, stage: "tail", type: "compacted" };
+  }
+  if (start !== "summary-only") {
+    const stripped = [
+      ...checkpointHead(summary),
+      ...keepNonToolResultMessages(recent),
+      ...resumable,
+    ];
+    if (reachesTarget(stripped)) {
+      return { messages: stripped, stage: "text-tail", type: "compacted" };
+    }
+  }
+  const clipped = clipSummary(summary, build, underThreshold) ?? build("");
+  return { messages: clipped, stage: "summary-only", type: "compacted" };
+}
+
+/**
+ * The history `build` makes from the largest piece of `summary` that `fits`, clipped from the
+ * middle; undefined when not even an empty summary fits.
+ */
+function clipSummary(
+  summary: string,
+  build: (summary: string) => ModelMessage[],
+  fits: (candidate: readonly ModelMessage[]) => boolean,
+): ModelMessage[] | undefined {
+  const clip = (chars: number) =>
+    build(
+      chars < MIN_CLIP_CHARS ? sliceUtf16Safe(summary, chars) : clipMiddleUtf16Safe(summary, chars),
+    );
+  if (!fits(clip(0))) return undefined;
+  let low = 0;
+  let high = summary.length;
+  while (low < high) {
+    const mid = Math.ceil((low + high) / 2);
+    if (fits(clip(mid))) {
+      low = mid;
+    } else {
+      high = mid - 1;
+    }
+  }
+  return clip(low);
 }
 
 /**
@@ -423,32 +540,12 @@ async function fixedTailHeuristic({
 
   // Last, the summary is clipped to the largest piece that fits beside the
   // request; undefined when the request leaves it no room at all.
-  const withClippedSummary = (request: ModelMessage | undefined): ModelMessage[] | undefined => {
-    const build = (chars: number) =>
-      withResumptionGuard(
-        checkpointHead(
-          chars < MIN_CLIP_CHARS
-            ? sliceUtf16Safe(summary, chars)
-            : clipMiddleUtf16Safe(summary, chars),
-        ),
-        request,
-        config.threshold,
-      );
-    if (!fits(build(0))) {
-      return undefined;
-    }
-    let low = 0;
-    let high = summary.length;
-    while (low < high) {
-      const mid = Math.ceil((low + high) / 2);
-      if (fits(build(mid))) {
-        low = mid;
-      } else {
-        high = mid - 1;
-      }
-    }
-    return build(low);
-  };
+  const withClippedSummary = (request: ModelMessage | undefined): ModelMessage[] | undefined =>
+    clipSummary(
+      summary,
+      (text) => withResumptionGuard(checkpointHead(text), request, config.threshold),
+      fits,
+    );
 
   const clipped = withClippedSummary(replay);
   if (clipped !== undefined) {
