@@ -191,7 +191,9 @@ function startStage(lastStage: CompactionStage | undefined): CompactionStage {
 interface CompactionHeuristicInput {
   readonly config: CompactionConfig;
   readonly conversation: readonly ModelMessage[];
+  readonly currentTurnStart: number;
   readonly forceSummary: boolean;
+  readonly messages: readonly ModelMessage[];
   readonly previousCheckpoint: string | undefined;
   readonly resume: boolean;
   readonly summarize: CompactionSummarizer;
@@ -207,7 +209,10 @@ type CompactionHeuristicOutcome =
 
 type CompactionHeuristic = (input: CompactionHeuristicInput) => Promise<CompactionHeuristicOutcome>;
 
-const COMPACTION_HEURISTICS: readonly CompactionHeuristic[] = [fixedTailHeuristic];
+const COMPACTION_HEURISTICS: readonly CompactionHeuristic[] = [
+  currentTurnHeuristic,
+  fixedTailHeuristic,
+];
 
 export async function compactMessages(
   messages: ModelMessage[],
@@ -216,12 +221,17 @@ export async function compactMessages(
   forceSummary = false,
   resume = true,
 ): Promise<{ readonly messages: ModelMessage[]; readonly stage: CompactionStage }> {
-  const { conversation, previousCheckpoint } = extractPreviousCheckpoint(messages);
+  const extracted = extractPreviousCheckpoint(messages);
+  const { previousCheckpoint } = extracted;
+  const conversation = extracted.conversation;
+  const currentTurnStart = resume ? findLastRealUserIndex(conversation) : -1;
   for (const heuristic of COMPACTION_HEURISTICS) {
     const outcome = await heuristic({
       config,
       conversation,
+      currentTurnStart,
       forceSummary,
+      messages,
       previousCheckpoint,
       resume,
       summarize,
@@ -231,6 +241,97 @@ export async function compactMessages(
     }
   }
   throw overLimitError(config);
+}
+
+async function currentTurnHeuristic({
+  config,
+  conversation,
+  currentTurnStart,
+  forceSummary,
+  messages,
+  previousCheckpoint,
+  summarize,
+}: CompactionHeuristicInput): Promise<CompactionHeuristicOutcome> {
+  if (currentTurnStart < 0) return { type: "insufficient" };
+  const turn = conversation.slice(currentTurnStart);
+  const older = conversation.slice(0, currentTurnStart);
+  const ratio = estimateRatio(config);
+  const underThreshold = (candidate: readonly ModelMessage[]) =>
+    estimateTokens(candidate) <= config.threshold;
+  const resumable =
+    turn.at(-1)?.role === "assistant"
+      ? [
+          ...turn,
+          createFrameworkUserMessage("execution.continuation", COMPACTION_RESUMPTION_MESSAGE),
+        ]
+      : turn;
+  const build = (text: string) => [...checkpointHead(text), ...resumable];
+  if (!underThreshold(build(""))) return { type: "insufficient" };
+  if (older.length === 0) {
+    const kept = resumable === turn ? [...messages] : [...messages, resumable.at(-1)!];
+    return { messages: kept, stage: "summary-only", type: "compacted" };
+  }
+
+  const cappedOlder = capToolResults(older);
+  const recentConfig = forceSummary ? { ...config, recentWindowSize: 1 } : config;
+  const keep = selectRecentWindowSize(
+    cappedOlder,
+    recentConfig,
+    Math.max(0, keptTailBudget(config) - estimateTokens(turn)),
+  );
+  const { recent } = splitMessagesForCompaction(cappedOlder, keep);
+  const summaryPrompt = createCompactionPrompt({
+    messages: cappedOlder,
+    previousCheckpoint,
+    transcriptBudgetTokens: config.threshold,
+  });
+  const summary = await summarize({
+    messages: [createFrameworkUserMessage("context.compaction", summaryPrompt.prompt)],
+    system: summaryPrompt.system,
+  });
+
+  const reachesTarget = (candidate: readonly ModelMessage[]) =>
+    Math.ceil(estimateTokens(candidate) * ratio) <= config.target;
+  const start = startStage(config.lastStage);
+  if (start === "tail") {
+    const verbatim = [...checkpointHead(summary), ...recent, ...resumable];
+    if (reachesTarget(verbatim)) return { messages: verbatim, stage: "tail", type: "compacted" };
+  }
+  if (start !== "summary-only") {
+    const stripped = [
+      ...checkpointHead(summary),
+      ...keepNonToolResultMessages(recent),
+      ...resumable,
+    ];
+    if (reachesTarget(stripped)) {
+      return { messages: stripped, stage: "text-tail", type: "compacted" };
+    }
+  }
+  const clipped = clipSummary(summary, build, underThreshold) ?? build("");
+  return { messages: clipped, stage: "summary-only", type: "compacted" };
+}
+
+function clipSummary(
+  summary: string,
+  build: (summary: string) => ModelMessage[],
+  fits: (candidate: readonly ModelMessage[]) => boolean,
+): ModelMessage[] | undefined {
+  const clip = (chars: number) =>
+    build(
+      chars < MIN_CLIP_CHARS ? sliceUtf16Safe(summary, chars) : clipMiddleUtf16Safe(summary, chars),
+    );
+  if (!fits(clip(0))) return undefined;
+  let low = 0;
+  let high = summary.length;
+  while (low < high) {
+    const mid = Math.ceil((low + high) / 2);
+    if (fits(clip(mid))) {
+      low = mid;
+    } else {
+      high = mid - 1;
+    }
+  }
+  return clip(low);
 }
 
 async function fixedTailHeuristic({
@@ -332,32 +433,12 @@ async function fixedTailHeuristic({
     return { messages: noTail, stage: "summary-only", type: "compacted" };
   }
 
-  const withClippedSummary = (request: ModelMessage | undefined): ModelMessage[] | undefined => {
-    const build = (chars: number) =>
-      withResumptionGuard(
-        checkpointHead(
-          chars < MIN_CLIP_CHARS
-            ? sliceUtf16Safe(summary, chars)
-            : clipMiddleUtf16Safe(summary, chars),
-        ),
-        request,
-        config.threshold,
-      );
-    if (!fits(build(0))) {
-      return undefined;
-    }
-    let low = 0;
-    let high = summary.length;
-    while (low < high) {
-      const mid = Math.ceil((low + high) / 2);
-      if (fits(build(mid))) {
-        low = mid;
-      } else {
-        high = mid - 1;
-      }
-    }
-    return build(low);
-  };
+  const withClippedSummary = (request: ModelMessage | undefined): ModelMessage[] | undefined =>
+    clipSummary(
+      summary,
+      (text) => withResumptionGuard(checkpointHead(text), request, config.threshold),
+      fits,
+    );
 
   const clipped = withClippedSummary(replay);
   if (clipped !== undefined) {

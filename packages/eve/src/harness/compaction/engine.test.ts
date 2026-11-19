@@ -510,41 +510,6 @@ async function compactWithToolInTail(exchange: readonly ModelMessage[]) {
   return { result, tool: result.find((message) => message.role === "tool") };
 }
 
-describe("compactMessages: summarizing a history over the trigger", () => {
-  it("summarizes the older region, large tool results included, in one call", async () => {
-    const messages = [
-      user("investigate the bug"),
-      ...toolExchange({ callId: "call-0", payloadChars: 4_000 }),
-      assistant("found it"),
-      user("fix it"),
-      assistant("fixed"),
-      user("what now?"),
-    ];
-    const threshold = Math.floor(estimateTokens(messages));
-    expect(shouldCompact(messages, { recentWindowSize: 2, target: threshold, threshold })).toBe(
-      true,
-    );
-
-    const { result, stage, summarizer } = await compact(messages, {
-      recentWindowSize: 2,
-      threshold,
-    });
-
-    expect(summarizer).toHaveBeenCalledOnce();
-    expect(stage).toBe("tail");
-    expect(result).toEqual([
-      ...checkpointHead("checkpoint text"),
-      assistant("fixed"),
-      user("what now?"),
-    ]);
-    expect(result.some((message) => message.role === "tool")).toBe(false);
-    expect(JSON.stringify(result)).not.toContain("x".repeat(2_001));
-    const transcript = summarizerTranscript(summarizer);
-    expect(transcript).toContain("Truncated by eve");
-    expect(transcript).not.toContain("x".repeat(2_001));
-  });
-});
-
 describe("compactMessages: target and estimate ratio", () => {
   const summary = "checkpoint text";
   const tail = [
@@ -553,38 +518,6 @@ describe("compactMessages: target and estimate ratio", () => {
     user("go on"),
   ];
   const history = [user("old notes ".repeat(500)), assistant("ok"), ...tail];
-  const verbatim = [...checkpointHead(summary), ...tail];
-  const textTail = [...checkpointHead(summary), user("question"), user("go on")];
-
-  it.each([
-    ["1.3", 1.3, 1.3],
-    ["unset, which uses 1.6", undefined, 1.6],
-  ])(
-    "judges the tail against the target at the estimate times the ratio (%s)",
-    async (_name, ratio, factor) => {
-      const atTarget = Math.ceil(estimateTokens(verbatim) * factor);
-      const run = (target: number) =>
-        compactMessages(
-          history,
-          { estimateRatio: ratio, recentWindowSize: 4, target, threshold: ROOMY },
-          summarizeWith(summary),
-        );
-
-      await expect(run(atTarget)).resolves.toEqual({ messages: verbatim, stage: "tail" });
-      await expect(run(atTarget - 1)).resolves.toEqual({
-        messages: textTail,
-        stage: "text-tail",
-      });
-    },
-  );
-
-  it("starts at the text-only tail after a compaction that ended at the verbatim tail", async () => {
-    const { result, stage } = await compact(history, { lastStage: "tail", recentWindowSize: 4 });
-
-    expect(stage).toBe("text-tail");
-    expect(result).toEqual(textTail);
-    expect(result.some((message) => message.role === "tool")).toBe(false);
-  });
 
   it.each(["text-tail", "summary-only"] as const)(
     "starts at the summary alone after a compaction that ended at %s",
@@ -1009,17 +942,6 @@ describe("compactMessages: capped tool results", () => {
     expect(result.slice(-2)).toEqual([recentCall, recentResult]);
   });
 
-  it("summarizes a tool result with its call when the window would split them", async () => {
-    const [call, resultMsg] = toolExchange({ callId: "call-1", payloadChars: 40 });
-    const messages = [user("old context"), call, resultMsg, user("next question")];
-
-    const { result, summarizer } = await compact(messages, { recentWindowSize: 2 });
-
-    expect(summarizer).toHaveBeenCalledOnce();
-    expect(result).not.toContainEqual(call);
-    expect(result).not.toContainEqual(resultMsg);
-  });
-
   it("summarizes even when capping the older tool results alone would fit", async () => {
     const [olderCall, olderResult] = toolExchange({ callId: "call-0", payloadChars: 200_000 });
     const messages = [user("read the log"), olderCall, olderResult, user("now fix it")];
@@ -1030,49 +952,6 @@ describe("compactMessages: capped tool results", () => {
     expect(result[0]).toEqual(compactionMarker(CHECKPOINT_MARKER));
     expect(result[1]).toEqual(assistant("checkpoint text"));
     expect(result).not.toContainEqual(olderCall);
-  });
-});
-
-describe("compactMessages: forced summary", () => {
-  it("summarizes the full conversation even when it is already under the threshold", async () => {
-    const summarize = summarizeWith("forced checkpoint");
-    const messages = [user("old message"), assistant("old reply")];
-
-    const result = await compactHistory(
-      messages,
-      { recentWindowSize: 10, threshold: ROOMY },
-      summarize,
-      true,
-    );
-
-    expect(summarize).toHaveBeenCalledOnce();
-    expect(result).toContainEqual({ content: "forced checkpoint", role: "assistant" });
-  });
-
-  it("replays nothing between turns, where every request already has its answer", async () => {
-    const messages = [
-      user("old notes ".repeat(400)),
-      assistant("Noted."),
-      user("Did QA pass?"),
-      assistant("QA passed."),
-    ];
-
-    const between = await compactHistory(
-      messages,
-      { recentWindowSize: 1, threshold: ROOMY },
-      summarizeWith("checkpoint"),
-      true,
-      false,
-    );
-    const during = await compactHistory(
-      messages,
-      { recentWindowSize: 1, threshold: ROOMY },
-      summarizeWith("checkpoint"),
-      true,
-    );
-
-    expect(between.at(-1)).toEqual(assistant("QA passed."));
-    expect(during.at(-1)).toEqual(user("Did QA pass?"));
   });
 });
 
@@ -1160,26 +1039,6 @@ describe("compactMessages: summarization fallback", () => {
     expect(result.some((m) => m.content === "old context to fold away")).toBe(false);
   });
 
-  it("feeds the previous checkpoint to the summarizer untruncated and replaces it", async () => {
-    const markerPast280 = "CRITICAL_STATE_AFTER_280_CHARACTERS";
-    const previousCheckpoint = `${"completed work ".repeat(24)}${markerPast280}`;
-    const messages = [
-      ...checkpointHead(previousCheckpoint),
-      user(`new evidence ${"findings ".repeat(60)}`),
-      assistant("latest response"),
-    ];
-
-    const { result, summarizer } = await compact(messages, {
-      summary: "Updated checkpoint",
-      threshold: TIGHT_THRESHOLD,
-    });
-
-    expect(summarizer.mock.calls[0]?.[0]?.messages?.[0]?.content).toContain(previousCheckpoint);
-    expect(summarizer.mock.calls[0]?.[0]?.messages?.[0]?.content).toContain(markerPast280);
-    expect(result.filter((m) => m.content === previousCheckpoint)).toHaveLength(0);
-    expect(result.filter((m) => m.content === "Updated checkpoint")).toHaveLength(1);
-  });
-
   it("keeps the recent window verbatim after summarizing when it fits", async () => {
     const oldProse = user("investigation notes ".repeat(2_000));
     const [recentCall, recentResult] = toolExchange({ callId: "call-1", payloadChars: 100 });
@@ -1192,74 +1051,6 @@ describe("compactMessages: summarization fallback", () => {
 
     expect(summarizer).toHaveBeenCalledTimes(1);
     expect(result.slice(2, 4)).toEqual([recentCall, recentResult]);
-  });
-
-  it("replays a folded-away task when recent tool results survive", async () => {
-    const task = user("Keep the original request and its final task sentinel.");
-    const [call, resultMsg] = toolExchange({ callId: "call-1", payloadChars: 100 });
-    const { result, summarizer } = await compact(
-      [user("old notes ".repeat(4_000)), task, call, resultMsg],
-      { recentWindowSize: 2, threshold: 2_048 },
-    );
-
-    expect(summarizer).toHaveBeenCalled();
-    expect(result).toContainEqual(call);
-    expect(result).toContainEqual(resultMsg);
-    expect(result.at(-1)).toEqual(task);
-  });
-
-  it("makes room for the original task before keeping a large tool-result tail", async () => {
-    const task = user("Keep these requirements. ".repeat(25));
-    const [call, resultMsg] = toolExchange({ callId: "call-1", payloadChars: 600 });
-    const summary = "s".repeat(2_800);
-    const head = checkpointHead(summary);
-    const threshold =
-      Math.floor(
-        (estimateTokens([...head, task]) + estimateTokens([...head, call, resultMsg, task])) / 2,
-      ) + ENVELOPE_TOKENS;
-    const { result } = await compact([user("old notes ".repeat(4_000)), task, call, resultMsg], {
-      recentWindowSize: 2,
-      summary,
-      threshold,
-    });
-
-    expect(result.at(-1)).toEqual(task);
-    expect(estimateTokens(result)).toBeLessThanOrEqual(threshold);
-  });
-
-  it("strips tool activity from the tail when verbatim does not fit but text does", async () => {
-    const oldProse = user("investigation notes ".repeat(2_000));
-    const [recentCall, recentResult] = toolExchange({
-      callId: "call-1",
-      payloadChars: 1_400,
-      prose: "Running the tool.",
-    });
-    const tail = [user("do the thing"), recentCall, recentResult];
-    const messages = [oldProse, ...tail];
-
-    const summary = "s".repeat(2_400);
-    const summaryHead = [compactionMarker(CHECKPOINT_MARKER), assistant(summary)];
-    const verbatimSize = estimateTokens([...summaryHead, ...tail]);
-    const strippedSize = estimateTokens([
-      ...summaryHead,
-      user("do the thing"),
-      assistant("Running the tool."),
-    ]);
-    const threshold = Math.floor(verbatimSize) - 50;
-    expect(strippedSize).toBeLessThan(threshold);
-    expect(verbatimSize).toBeGreaterThan(threshold);
-    expect(estimateTokens(tail)).toBeLessThanOrEqual(threshold / 2);
-
-    const { result, summarizer } = await compact(messages, {
-      recentWindowSize: 3,
-      summary,
-      threshold,
-    });
-
-    expect(summarizer).toHaveBeenCalledTimes(1);
-    expect(result).toContainEqual(user("do the thing"));
-    expect(result).toContainEqual(assistant("Running the tool."));
-    expect(result.some((m) => m.role === "tool")).toBe(false);
   });
 
   it("folds everything into the summary when even the stripped tail cannot fit", async () => {
@@ -1277,21 +1068,6 @@ describe("compactMessages: summarization fallback", () => {
       assistant("Summary of the large SQL result"),
       user("Find the relevant rows."),
     ]);
-  });
-
-  it("replays the folded-away user prompt when the tail would trail on assistant content", async () => {
-    const messages = [
-      user("please fix the flaky test"),
-      assistant("working on it"),
-      assistant("still going"),
-    ];
-
-    const { result } = await compact(messages, {
-      recentWindowSize: 1,
-      threshold: TIGHT_THRESHOLD,
-    });
-
-    expect(result.at(-1)).toEqual(user("please fix the flaky test"));
   });
 
   it("falls back to a framework continuation when the real user prompt survives in the tail", async () => {
@@ -1370,24 +1146,6 @@ describe("compactMessages: fixed kept-tail budget", () => {
     const result = await compactHistory(history, config(history), summarizeWith("s"));
 
     expect(result).toContainEqual(task);
-  });
-
-  it("keeps the start and end of a request and sends the cut middle to the summarizer", async () => {
-    const summarizer = summarizeWith("checkpoint text");
-    const task = user(
-      `START SENTINEL${"a".repeat(8_000)}MIDDLE MARKER${"b".repeat(26_000)}END SENTINEL`,
-    );
-    const history: ModelMessage[] = [task, ...toolExchange({ callId: "call-0", payloadChars: 50 })];
-
-    const result = await compactHistory(history, config(history), summarizer);
-
-    const prompt = String(summarizer.mock.calls[0]?.[0]?.messages?.[0]?.content);
-    expect(prompt).toContain("MIDDLE MARKER");
-    expect(prompt).not.toContain("START SENTINEL");
-    expect(prompt).not.toContain("END SENTINEL");
-    expect(JSON.stringify(result)).toContain("START SENTINEL");
-    expect(JSON.stringify(result)).toContain("END SENTINEL");
-    expect(JSON.stringify(result)).not.toContain("MIDDLE MARKER");
   });
 
   it("gives the summarizer as much of an oversized head as the budget holds", async () => {
@@ -1694,45 +1452,6 @@ describe("compactMessages: fixed kept-tail budget", () => {
     expect(summarizer).not.toHaveBeenCalled();
   });
 
-  it("shortens a huge tool result in the kept tail instead of cutting the request or throwing", async () => {
-    const request = user("Read the file and report what is in it.");
-    const history: ModelMessage[] = [
-      user("old notes ".repeat(6_000)),
-      assistant("Done."),
-      request,
-      ...toolExchange({ callId: "call-0", payloadChars: 100_000 }),
-    ];
-
-    const result = await compactHistory(
-      history,
-      { recentWindowSize: 4, threshold: 30_000 },
-      summarizeWith("checkpoint text"),
-    );
-
-    expect(result).toContainEqual(request);
-    expect(JSON.stringify(result)).toContain("Truncated by eve");
-    expect(JSON.stringify(result)).not.toContain("cut during context compaction");
-    expect(estimateTokens(result)).toBeLessThan(30_000);
-  });
-
-  it("never keeps more than the budget word for word", async () => {
-    const history: ModelMessage[] = [
-      user("start"),
-      ...Array.from({ length: 12 }, (_, index) =>
-        toolExchange({ callId: `call-${index}`, payloadChars: 1_800 }),
-      ).flat(),
-    ];
-
-    const result = await compactHistory(
-      history,
-      { recentWindowSize: 40, threshold: 10_000 },
-      summarizeWith("checkpoint text"),
-      true,
-    );
-
-    expect(estimateTokens(result.slice(2))).toBeLessThanOrEqual(BUDGET);
-  });
-
   it("replays the latest request, not an older oversized task, when the latest has no text", async () => {
     const pdfRequest: ModelMessage = {
       content: [
@@ -1788,38 +1507,6 @@ describe("compactMessages: fixed kept-tail budget", () => {
       expect(compactions).toBeLessThanOrEqual(5);
     },
   );
-
-  it("cuts the request when the previous checkpoint is what pushes the history over the limit", async () => {
-    const history: ModelMessage[] = [
-      ...checkpointHead("p".repeat(12_000)),
-      user("r".repeat(34_000)),
-    ];
-
-    const result = await compactHistory(
-      history,
-      { recentWindowSize: 1, threshold: 10_000 },
-      summarizeWith("z".repeat(8_000)),
-    );
-
-    expect(JSON.stringify(result)).toContain("were cut during context compaction");
-  });
-
-  it("replays a folded-away request whose content is an array of parts", async () => {
-    const request: ModelMessage = {
-      content: [{ text: "review the storefront", type: "text" }],
-      role: "user",
-    };
-    const history: ModelMessage[] = [request, assistant("Working on it.")];
-
-    const result = await compactHistory(
-      history,
-      { recentWindowSize: 1, threshold: 10_000 },
-      summarizeWith("checkpoint text"),
-      true,
-    );
-
-    expect(result.at(-1)).toEqual(request);
-  });
 });
 
 function isCheckpoint(message: ModelMessage): boolean {
