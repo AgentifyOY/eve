@@ -1,3 +1,4 @@
+import { getStepMetadata } from "#compiled/@workflow/core/index.js";
 import type { SessionAuth, SessionParent } from "#context/session-context.js";
 import type { AgentSessionContext } from "#execution/agent-sessions/context.js";
 import { createRuntimeToolResultFromValue } from "#harness/action-result-helpers.js";
@@ -30,8 +31,26 @@ export type StartWorkflowToolRun = (
 /** The hook a new run takes its session's commands on, on any host. */
 export function workflowToolRunHookToken(input: Omit<WorkflowToolRunInput, "hookToken">): string {
   return input.entry.entryPoint === "execute"
-    ? crypto.randomUUID()
+    ? callRunHookToken(input.session.id, input.callId)
     : taskRunHookToken(input.session.id, input.entry.taskId);
+}
+
+/**
+ * A call's run takes the session's commands on a hook named for the step that starts it: Workflow
+ * may run that step's body again, and the run a second body starts can't take the hook.
+ */
+function callRunHookToken(sessionId: string, callId: string): string {
+  const stepId = currentStepId();
+  return stepId === undefined ? crypto.randomUUID() : `eve:call:${sessionId}:${stepId}:${callId}`;
+}
+
+function currentStepId(): string | undefined {
+  try {
+    return getStepMetadata().stepId;
+  } catch (error) {
+    if (error instanceof Error && error.name === "NotInStepContextError") return undefined;
+    throw error;
+  }
 }
 
 /**
