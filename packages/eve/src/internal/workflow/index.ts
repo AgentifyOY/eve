@@ -8,3 +8,6 @@ export async function fetch(...args: Parameters<typeof globalThis.fetch>): Promi
   "use step";
   return await globalThis.fetch(...args);
 }
+// A request may write to another system, so its body starts only once Workflow has recorded its
+// start, and a failed request is not sent again.
+(fetch as typeof fetch & { maxRetries: number }).maxRetries = 0;

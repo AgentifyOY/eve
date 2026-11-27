@@ -158,17 +158,15 @@ export function sessionSignInCallbacks(sessionId: string): SignInCallbacks | und
     : { callbackBaseUrl, deliver: durable.deliver };
 }
 
-/** Whether the step running now is a retry of an attempt that may have written already. */
+/** Whether the step running now may follow an attempt that has written already. */
 export function isRetriedStep(): boolean {
-  return (stepAttempt() ?? 1) > 1;
-}
-
-function stepAttempt(): number | undefined {
   for (const route of hosts().routes) {
     const attempt = route.stepAttempt?.();
-    if (attempt !== undefined) return attempt;
+    if (attempt !== undefined) return attempt > 1;
   }
-  return hosts().durable?.stepAttempt();
+  // Workflow starts a durable step's body before its start is recorded, and runs it again, as
+  // the same attempt, when that record is lost. Any attempt may follow one that wrote.
+  return hosts().durable?.stepAttempt() !== undefined;
 }
 
 /**

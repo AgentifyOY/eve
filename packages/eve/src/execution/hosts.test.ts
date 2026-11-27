@@ -131,11 +131,10 @@ describe("the hosts in a realm", () => {
     expect(installedDurableHost()?.name).toBe("durable");
   });
 
-  it("reads whether the step running now is a retry from the durable host", () => {
+  it("lets every durable attempt fold what an earlier copy of the step wrote", () => {
     installDurableHost(durableHost("durable"));
+    // Workflow runs a speculatively started step again as the same attempt.
     durable.attempt = 1;
-    expect(isRetriedStep()).toBe(false);
-    durable.attempt = 2;
     expect(isRetriedStep()).toBe(true);
     durable.attempt = undefined;
     expect(isRetriedStep()).toBe(false);
