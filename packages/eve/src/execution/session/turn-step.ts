@@ -339,6 +339,7 @@ async function runSessionStepBody(
   const publisher = openSessionEventPublisher({
     ctx,
     origin: "own",
+    sessionId: durableSession.sessionId,
     sessionWritable: input.sessionWritable,
   });
   const { adapterCtx } = publisher.dispatcher;

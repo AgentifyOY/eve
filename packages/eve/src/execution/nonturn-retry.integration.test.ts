@@ -1,5 +1,5 @@
 // @linux-only: non-turn step retry adoption
-import { expect, it, onTestFinished } from "vitest";
+import { expect, it, onTestFinished, vi } from "vitest";
 import { registerHost, registerSessionLineStore } from "#execution/hosts.js";
 import { createMemoryLineStore } from "#execution/in-process/line-store.js";
 import { createStepAttempts } from "#execution/in-process/step-attempts.js";
@@ -24,6 +24,35 @@ import { defineDynamic } from "#public/definitions/connections/dynamic.js";
 import { defineMcpClientConnection } from "#public/definitions/connections/mcp.js";
 import { loadContext } from "#context/container.js";
 import { ConnectionRegistryKey } from "#context/providers/connection.js";
+import { defineChannel, POST } from "#public/definitions/channel.js";
+import { claimFirstCopy, type ClaimStreams } from "#execution/step-copy-claim.js";
+
+// A durable host's claim on the step copy running now, when a test runs two copies of one attempt.
+const copyClaims = vi.hoisted(() => ({ claim: undefined as (() => Promise<boolean>) | undefined }));
+vi.mock("#execution/hosts.js", async (importOriginal) => {
+  const hosts = await importOriginal<typeof import("#execution/hosts.js")>();
+  return {
+    ...hosts,
+    claimStepCopy: () => copyClaims.claim?.() ?? hosts.claimStepCopy(),
+  };
+});
+
+/** A World's ordered streams in memory, each call yielding first so two copies interleave. */
+function memoryClaimStreams(): ClaimStreams {
+  const streams = new Map<string, Uint8Array[]>();
+  return {
+    async write(_runId, name, chunk) {
+      await new Promise((resolve) => setImmediate(resolve));
+      const bytes = typeof chunk === "string" ? new TextEncoder().encode(chunk) : chunk;
+      streams.set(name, [...(streams.get(name) ?? []), bytes]);
+    },
+    async getChunks(_runId, name, options) {
+      await new Promise((resolve) => setImmediate(resolve));
+      const chunks = (streams.get(name) ?? []).slice(0, options?.limit);
+      return { data: chunks.map((data) => ({ data })) };
+    },
+  };
+}
 
 // Non-turn session steps that lose their completion, or throw, and run again. Each test runs
 // the attempts a durable host would, in process: what an attempt wrote stays on the session's
@@ -52,17 +81,23 @@ function sessionSteps() {
     for (const release of releases) release();
   });
   let closes = 0;
+  // Writables append one at a time, as a World does for copies of a step that write at once.
+  let appending: Promise<void> = Promise.resolve();
   /** A writable of the attempt's own onto the session's stream, as each Workflow step gets. */
   const writable = () => {
-    const withWriter = async (
+    const withWriter = (
       use: (writer: WritableStreamDefaultWriter<Uint8Array>) => Promise<void>,
     ) => {
-      const writer = stream.getWriter();
-      try {
-        await use(writer);
-      } finally {
-        writer.releaseLock();
-      }
+      const appended = appending.then(async () => {
+        const writer = stream.getWriter();
+        try {
+          await use(writer);
+        } finally {
+          writer.releaseLock();
+        }
+      });
+      appending = appended.catch(() => undefined);
+      return appended;
     };
     return new WritableStream<Uint8Array>({
       write: (chunk) => withWriter((writer) => writer.write(chunk)),
@@ -342,3 +377,37 @@ it.each(["prefix", "none"] as const)(
     });
   },
 );
+
+it("posts once when two copies of one step attempt run at the same time", async () => {
+  const posts: string[] = [];
+  const stub = defineChannel({
+    events: {
+      "session.started"(_event, ctx) {
+        posts.push(`session.started@${ctx.position.line}`);
+      },
+    },
+    routes: [POST("/stub", async () => new Response("ok"))],
+  });
+  const streams = memoryClaimStreams();
+  copyClaims.claim = () => claimFirstCopy(streams, "wrun_copies", "claim");
+  onTestFinished(() => {
+    copyClaims.claim = undefined;
+  });
+  const runtime = await createTestRuntime({
+    agent: { name: "concurrent-step-copies" },
+    modules: [{ logicalPath: "channels/stub.ts", loadNamespace: async () => ({ default: stub }) }],
+  });
+  await runtime.run(async () => {
+    const session = sessionSteps();
+    const stubContext = buildSerializedContext({ channelKind: "channel:stub" });
+    const [first, second] = await Promise.all([
+      session.run(1, (step) => publishStart(step, stubContext)),
+      session.run(1, (step) => publishStart(step, stubContext)),
+    ]);
+    expect(posts).toEqual(["session.started@0"]);
+    expect((await session.lines()).map((event) => [event.type, event.meta.position.line])).toEqual([
+      ["session.started", 0],
+    ]);
+    expect(second.sessionState).toEqual(first.sessionState);
+  });
+});

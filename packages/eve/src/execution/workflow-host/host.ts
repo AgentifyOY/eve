@@ -8,6 +8,7 @@ import { resumeSignInCallback } from "#execution/session-inbox/owner.js";
 import { resumeSessionInbox } from "#execution/session-inbox/resume.js";
 import { resolveWorkflowCallbackBaseUrl } from "#execution/workflow-callback-url.js";
 import { createWorkflowRuntime } from "#execution/workflow-runtime.js";
+import { claimFirstCopy, stepClaimStreamName } from "#execution/step-copy-claim.js";
 import {
   findConnectionEventOwner,
   retireConnectionEventOwner,
@@ -86,14 +87,28 @@ export const workflowHost: DurableHost = {
     }
   },
   stepAttempt() {
-    try {
-      return getStepMetadata().attempt;
-    } catch (error) {
-      if (error instanceof Error && error.name === "NotInStepContextError") return undefined;
-      throw error;
-    }
+    return currentStep()?.attempt;
+  },
+  async claimStepCopy() {
+    const step = currentStep();
+    if (step === undefined) return true;
+    const runId = getWorkflowMetadata().workflowRunId;
+    return await claimFirstCopy(
+      (await getWorld()).streams,
+      runId,
+      stepClaimStreamName(runId, step.stepId, step.attempt),
+    );
   },
 };
+
+function currentStep(): ReturnType<typeof getStepMetadata> | undefined {
+  try {
+    return getStepMetadata();
+  } catch (error) {
+    if (error instanceof Error && error.name === "NotInStepContextError") return undefined;
+    throw error;
+  }
+}
 
 /** Makes Workflow this realm's durable host. */
 export function installWorkflowHost(): void {
