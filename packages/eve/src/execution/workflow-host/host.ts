@@ -1,13 +1,14 @@
 import { getStepMetadata, getWorkflowMetadata } from "#compiled/@workflow/core/index.js";
 import { RunExpiredError } from "#compiled/@workflow/errors/index.js";
 import type { DeliverHookPayload } from "#channel/types.js";
-import { installDurableHost, type DurableHost } from "#execution/hosts.js";
+import { CLAIMED_STEP_WAIT_MS, installDurableHost, type DurableHost } from "#execution/hosts.js";
 import type { AuthorizationCallbackPayload } from "#execution/session-inbox/inbox.js";
 import type { SessionLineStore } from "#execution/session-line-store.js";
 import { resumeSignInCallback } from "#execution/session-inbox/owner.js";
 import { resumeSessionInbox } from "#execution/session-inbox/resume.js";
 import { resolveWorkflowCallbackBaseUrl } from "#execution/workflow-callback-url.js";
 import { createWorkflowRuntime } from "#execution/workflow-runtime.js";
+import { claimFirstCopy, stepClaimStreamName } from "#execution/step-copy-claim.js";
 import {
   findConnectionEventOwner,
   retireConnectionEventOwner,
@@ -86,14 +87,42 @@ export const workflowHost: DurableHost = {
     }
   },
   stepAttempt() {
-    try {
-      return getStepMetadata().attempt;
-    } catch (error) {
-      if (error instanceof Error && error.name === "NotInStepContextError") return undefined;
-      throw error;
+    return currentStep()?.attempt;
+  },
+  async claimStepCopy() {
+    const step = currentStep();
+    if (step === undefined) return true;
+    const runId = getWorkflowMetadata().workflowRunId;
+    return await claimFirstCopy(
+      (await getWorld()).streams,
+      runId,
+      stepClaimStreamName(runId, step.stepId, step.attempt),
+    );
+  },
+  async awaitClaimedStep() {
+    const step = currentStep();
+    if (step === undefined) return;
+    const runId = getWorkflowMetadata().workflowRunId;
+    const world = await getWorld();
+    const deadline = Date.now() + CLAIMED_STEP_WAIT_MS;
+    while (Date.now() < deadline) {
+      const stored = await world.steps.get(runId, step.stepId, { resolveData: "none" });
+      if (stored.status !== "running" || stored.attempt !== step.attempt) return;
+      await new Promise((resolve) => setTimeout(resolve, CLAIMED_STEP_POLL_MS));
     }
   },
 };
+
+const CLAIMED_STEP_POLL_MS = 1_000;
+
+function currentStep(): ReturnType<typeof getStepMetadata> | undefined {
+  try {
+    return getStepMetadata();
+  } catch (error) {
+    if (error instanceof Error && error.name === "NotInStepContextError") return undefined;
+    throw error;
+  }
+}
 
 /** Makes Workflow this realm's durable host. */
 export function installWorkflowHost(): void {

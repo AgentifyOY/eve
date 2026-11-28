@@ -1,4 +1,4 @@
-import { isRetriedStep } from "#execution/hosts.js";
+import { claimStepCopy, isRetriedStep } from "#execution/hosts.js";
 import { readSessionStreamTailIndex, streamSessionLines } from "#execution/session-event-stream.js";
 import type { ControlDelivery } from "#harness/types.js";
 import { buildAdapterContext } from "#channel/adapter-context.js";
@@ -296,6 +296,7 @@ async function publishInSessionScope<T>(
     inputSource: publication.inputSource,
     orphaned,
     origin: publication.origin,
+    sessionId: step.durableSession.sessionId,
     sessionWritable: step.sessionWritable,
   });
   try {
@@ -467,6 +468,42 @@ async function readLinesFrom(sessionId: string, first: number): Promise<Orphaned
   return lines;
 }
 
+/**
+ * Whether this copy of the running step owns its writes, asked once per copy (keyed by its
+ * session writable, which each copy restores afresh): at its first write, or earlier by a step
+ * whose lines another copy can't reproduce.
+ */
+const stepCopyClaims = new WeakMap<WritableStream<Uint8Array>, Promise<boolean>>();
+
+export function claimSessionWrites(sessionWritable: WritableStream<Uint8Array>): Promise<boolean> {
+  let claim = stepCopyClaims.get(sessionWritable);
+  if (claim === undefined) {
+    claim = claimStepCopy();
+    stepCopyClaims.set(sessionWritable, claim);
+  }
+  return claim;
+}
+
+/**
+ * How long a copy that lost its step's claim waits for the copy that won it to write a line. The
+ * winner writes as it goes, so only a winner that died or decided differently runs out the wait.
+ */
+const CLAIMED_LINE_WAIT_MS = 5 * 60_000;
+
+/** The line the copy that claimed the step writes at `position`, once it's on the stream. */
+async function readClaimedLine(sessionId: string, position: number): Promise<StoredLine> {
+  const signal = AbortSignal.timeout(CLAIMED_LINE_WAIT_MS);
+  for await (const record of streamSessionLines(sessionId, { startIndex: position, signal })) {
+    if (record.line !== undefined && record.position === position) return record.line;
+    break;
+  }
+  throw new Error(
+    signal.aborted
+      ? `Another copy of this step claimed its writes and did not write line ${position} in time.`
+      : `Cannot read line ${position}, which another copy of this step wrote.`,
+  );
+}
+
 /** The projection with orphaned lines folded in, as if the step had just written them. */
 export function foldOrphanedLines(
   projection: SessionProjection,
@@ -518,6 +555,8 @@ export function openSessionEventPublisher(input: {
   readonly cancelTurn?: () => void;
   readonly ctx: ContextContainer;
   readonly origin: SessionEventOrigin;
+  /** The session whose stream `sessionWritable` writes, read back when another copy writes it. */
+  readonly sessionId: string;
   readonly sessionWritable: WritableStream<Uint8Array>;
   readonly inputSource?: string;
   /**
@@ -531,8 +570,21 @@ export function openSessionEventPublisher(input: {
   const dispatcher = createSessionEventDispatcher(input);
   // Opened after the dispatcher, so a context that cannot build one leaves the
   // stream unlocked for the terminal event's fallback write.
-  const writer = openSessionEventWriter(input.sessionWritable);
+  const streamWriter = openSessionEventWriter(input.sessionWritable);
+  // Set once another copy of this step attempt claimed its writes: that copy writes each line and
+  // runs its handlers, and closes the stream; this one folds what it wrote.
+  let following = false;
+  const writer: SessionEventWriter = {
+    close: () => (following ? Promise.resolve(streamWriter.release()) : streamWriter.close()),
+    release: streamWriter.release,
+  };
   const committing = createLineCommitter();
+  // Folds a line another attempt or copy wrote at the next position, as if this one had written it.
+  const adopt = (written: StoredLine, at: string) => {
+    const position = nextLinePosition(ctx);
+    const lineAt = "facts" in written ? written.at : at;
+    recordPublishedLine(ctx, written, position, eventsOfLine(written, position, lineAt));
+  };
   // The tables as the step's first publication found them, for what its end announces.
   let before: SessionView | undefined;
   const emitOne = async (publication: SessionPublication): Promise<readonly WrittenEvent[]> => {
@@ -550,16 +602,19 @@ export function openSessionEventPublisher(input: {
           throw new Error("A retried step published differently from its interrupted attempt.");
         }
         orphaned.shift();
-        const lineAt = "facts" in earlier.line ? earlier.line.at : at;
-        recordPublishedLine(
-          ctx,
-          earlier.line,
-          position,
-          eventsOfLine(earlier.line, position, lineAt),
-        );
+        adopt(earlier.line, at);
         continue;
       }
-      await writer.write(bytes).catch((error: unknown) => {
+      if (following || !(await claimSessionWrites(input.sessionWritable))) {
+        following = true;
+        const theirs = await readClaimedLine(input.sessionId, position);
+        if (!sameLine(theirs, line)) {
+          throw new Error("A copy of this step published differently from the copy that wrote it.");
+        }
+        adopt(theirs, at);
+        continue;
+      }
+      await streamWriter.write(bytes).catch((error: unknown) => {
         // Validation ran ahead of the write. A failed write must not leave the checker ahead
         // of the checkpoint; a later publication reseeds it from what actually committed.
         committer.reset();
@@ -748,6 +803,7 @@ export async function publishTerminalSessionEvent(input: {
     publisher = openSessionEventPublisher({
       ctx,
       origin: "own",
+      sessionId,
       sessionWritable: input.sessionWritable,
     });
   } catch (error) {

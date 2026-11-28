@@ -80,6 +80,16 @@ export interface DurableHost {
   /** The attempt of the durable step running now: 1 for its first, more for a retry. */
   stepAttempt(): number | undefined;
   /**
+   * Claims the attempt of the durable step running now for this copy of it: `true` for the first
+   * copy to ask, and outside a step. Workflow 5.8 may run two copies of one attempt at once.
+   */
+  claimStepCopy(): Promise<boolean>;
+  /**
+   * Waits, for a copy that lost its claim, until the attempt the other copy claimed no longer
+   * runs, or `CLAIMED_STEP_WAIT_MS` passes.
+   */
+  awaitClaimedStep(): Promise<void>;
+  /**
    * The base URL the session whose step runs now is called back at (its sign-in callbacks),
    * or `undefined` outside one of its steps.
    */
@@ -161,6 +171,26 @@ export function sessionSignInCallbacks(sessionId: string): SignInCallbacks | und
 /** Whether the step running now is a retry of an attempt that may have written already. */
 export function isRetriedStep(): boolean {
   return (stepAttempt() ?? 1) > 1;
+}
+
+/**
+ * Whether this copy of the step running now owns its writes: only one copy of a durable step's
+ * attempt writes the session's lines and runs their channel handlers. Ask once per copy, before
+ * its first write. A route's steps run one copy each, so outside a durable step it's `true`.
+ */
+export async function claimStepCopy(): Promise<boolean> {
+  return (await hosts().durable?.claimStepCopy()) ?? true;
+}
+
+/** How long a copy that lost its step's claim waits for the copy that won it to end the step. */
+export const CLAIMED_STEP_WAIT_MS = 60 * 60_000;
+
+/**
+ * Waits until the copy that claimed the step running now ends its attempt. Only a copy whose
+ * {@link claimStepCopy} lost waits; outside a durable step nothing loses, so it returns at once.
+ */
+export async function awaitClaimedStep(): Promise<void> {
+  await hosts().durable?.awaitClaimedStep();
 }
 
 function stepAttempt(): number | undefined {
