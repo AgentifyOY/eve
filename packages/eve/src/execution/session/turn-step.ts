@@ -75,6 +75,7 @@ import { pausedOrParked, resolveSessionStepResult } from "#execution/session/tur
 import { withSessionStateDelta } from "#execution/session/step-state-delta.js";
 import {
   foldOrphanedLines,
+  claimSessionWrites,
   openSessionEventPublisher,
   readOrphanedLines,
   type Entered,
@@ -124,7 +125,7 @@ import {
 import type { AuthorizationChallenge } from "#harness/authorization.js";
 import { signInInteractionId } from "#harness/interaction-facts.js";
 import { SIGN_IN_DECLINED } from "#harness/hitl/sign-ins.js";
-import { signInDelivery, type DurableHost } from "#execution/hosts.js";
+import { awaitClaimedStep, signInDelivery, type DurableHost } from "#execution/hosts.js";
 import type { SessionView } from "#protocol/session-projection/tables.js";
 import type { AuthorizationCallback } from "#shared/connection-types.js";
 
@@ -194,6 +195,13 @@ async function runSessionStepBody(
   pendingAttributes: PendingStepAttributes,
   host: SessionStepHost,
 ): Promise<DurableStepResult> {
+  // A turn's lines come from its model call, which a second copy of the attempt can't reproduce
+  // to fold the first copy's lines. So the copy that loses the claim runs nothing and waits for
+  // the winner to end the attempt; the run keeps the winner's outcome, not this copy's error.
+  if (!(await claimSessionWrites(input.sessionWritable))) {
+    await awaitClaimedStep();
+    throw new Error("Another copy of this step attempt claimed it and ran it.");
+  }
   // The delivery as accepted, before authorization callbacks are matched out of it.
   const rawDelivery = input.input?.delivery;
   let delivery = rawDelivery;

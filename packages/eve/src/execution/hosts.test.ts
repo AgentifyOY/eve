@@ -85,6 +85,7 @@ function durableHost(name: string): DurableHost {
     lineStore: fixedStore([{ line: "kept by the durable host" }]),
     stepAttempt: () => durable.attempt,
     claimStepCopy: async () => true,
+    awaitClaimedStep: async () => {},
     callbackBaseUrl: () => durable.callbackBaseUrl,
     createRuntime: () => {
       throw new Error("no runtime in this test");

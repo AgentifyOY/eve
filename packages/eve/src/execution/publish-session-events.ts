@@ -470,11 +470,12 @@ async function readLinesFrom(sessionId: string, first: number): Promise<Orphaned
 
 /**
  * Whether this copy of the running step owns its writes, asked once per copy (keyed by its
- * session writable, which each copy restores afresh) at its first write.
+ * session writable, which each copy restores afresh): at its first write, or earlier by a step
+ * whose lines another copy can't reproduce.
  */
 const stepCopyClaims = new WeakMap<WritableStream<Uint8Array>, Promise<boolean>>();
 
-function claimWrites(sessionWritable: WritableStream<Uint8Array>): Promise<boolean> {
+export function claimSessionWrites(sessionWritable: WritableStream<Uint8Array>): Promise<boolean> {
   let claim = stepCopyClaims.get(sessionWritable);
   if (claim === undefined) {
     claim = claimStepCopy();
@@ -604,7 +605,7 @@ export function openSessionEventPublisher(input: {
         adopt(earlier.line, at);
         continue;
       }
-      if (following || !(await claimWrites(input.sessionWritable))) {
+      if (following || !(await claimSessionWrites(input.sessionWritable))) {
         following = true;
         const theirs = await readClaimedLine(input.sessionId, position);
         if (!sameLine(theirs, line)) {

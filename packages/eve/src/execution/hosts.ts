@@ -85,6 +85,11 @@ export interface DurableHost {
    */
   claimStepCopy(): Promise<boolean>;
   /**
+   * Waits, for a copy that lost its claim, until the attempt the other copy claimed no longer
+   * runs, or `CLAIMED_STEP_WAIT_MS` passes.
+   */
+  awaitClaimedStep(): Promise<void>;
+  /**
    * The base URL the session whose step runs now is called back at (its sign-in callbacks),
    * or `undefined` outside one of its steps.
    */
@@ -175,6 +180,17 @@ export function isRetriedStep(): boolean {
  */
 export async function claimStepCopy(): Promise<boolean> {
   return (await hosts().durable?.claimStepCopy()) ?? true;
+}
+
+/** How long a copy that lost its step's claim waits for the copy that won it to end the step. */
+export const CLAIMED_STEP_WAIT_MS = 60 * 60_000;
+
+/**
+ * Waits until the copy that claimed the step running now ends its attempt. Only a copy whose
+ * {@link claimStepCopy} lost waits; outside a durable step nothing loses, so it returns at once.
+ */
+export async function awaitClaimedStep(): Promise<void> {
+  await hosts().durable?.awaitClaimedStep();
 }
 
 function stepAttempt(): number | undefined {
